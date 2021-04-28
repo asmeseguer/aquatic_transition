@@ -1,0 +1,237 @@
+################################################################################
+#
+# RevBayes Analysis: Bayesian inference of diversification rates under a
+#                    cladogenetic character-independent birth-death model (also
+#                    called CID. In Character-Independent BD models, speciation 
+#                    and extinction rates vary over time and across tips as in 
+#                    SSE models. However, rate-variation is independent from the
+#   				 focal observed character. It does not to be character-dependent,
+#					 either; it can be explained by other factors. 
+#
+# WE WILL USE CID AS AN APPROPRIATE NULL MODEL AGAINST HISSE
+# This example is from Andrea's aquatic green plants study
+# Adapted from Freyman & Hoehna HiSSE Onagraceae study (2 Hidden character states A/B)
+# "marginals_empirical_independent.Rev" file
+# 
+# Authors: Sebastian Hoehna & Will Freyman
+################################################################################
+
+#!/usr/bin/rb
+
+#rep = 1
+#seed(1)
+#base_dir = ""
+#sample_freq = 1
+
+#######################
+# Reading in the Data #
+#######################
+
+DATASET = "Acuatic"
+NUM_STATES = 2
+NUM_HIDDEN = 2
+NUM_TOTAL_SPECIES     = 13164.0 # Total number of angiosperm genera
+NUM_SAMPLED_SPECIES   = 10360.0 # Number genera sampled in phylogeny
+H                     = 0.587405
+
+# The states are represented as the following character states:
+# 0  Terrestrial (tips as "0")
+# 1  Aquatic (tips as "1")
+
+# Read the MAP tree
+observed_phylogeny <- readTrees("data/GBOTB-genuslevel-ult-cut-angiosp.tre")[1]
+
+
+# # Read the character set data. Two focal observed states 0 and 1 
+data <- readCharacterData("data/Bisse-coding-genus-widasaquat.nex.txt")
+
+# We need to expand the data to the hidden states
+data_exp <- data.expandCharacters( NUM_HIDDEN )
+
+# Get some useful variables from the data. We need these later on.
+taxa <- observed_phylogeny.taxa()
+
+# set moves and monitor indexes
+mvi = 1
+mni = 1
+
+# moves    = VectorMoves()
+# monitors = VectorMonitors()
+
+### Specify a prior on the initial values of the speciation and extinction rates 
+# We will use a lognormal prior as this distribution can only adopt positive values
+# We centre the rate_mean of the lognormal prior on the observed total number of species
+# Expected num species at time t under constant birth-death is
+# E(N_t) = N_0 e^{rt}
+# therefore net diversification r is
+# r = ( ln N_t - ln N_0 ) / t
+# We use r as the mean for the speciation prior
+
+rate_mean <- abs( ln( 13164.0 / 2.0 ) / observed_phylogeny.rootAge() )
+
+# speciation and extinction rates for each of the 4 states (Observed * Hidden)
+# drawn from log normal distributions
+
+for (i in 1:2) {
+    
+    spec_AB[i] ~ dnLognormal(ln(rate_mean), 1)
+    moves[mvi++] = mvScale(spec_AB[i], lambda=2.0, weight=4)
+    moves[mvi++] = mvScale(spec_AB[i], lambda=0.5, weight=4)
+    moves[mvi++] = mvScale(spec_AB[i], lambda=0.01, weight=4)
+    
+    ext_AB[i] ~ dnLognormal(ln(rate_mean), 1)
+    moves[mvi++] = mvScale(ext_AB[i], lambda=2.0, weight=4)
+    moves[mvi++] = mvScale(ext_AB[i], lambda=0.5, weight=4)
+    moves[mvi++] = mvScale(ext_AB[i], lambda=0.01, weight=4)
+    
+    up_down_scale_mv[i] = mvUpDownScale(lambda=0.5, weight=8)
+    up_down_scale_mv[i].addVariable( spec_AB[i], TRUE )
+    up_down_scale_mv[i].addVariable( ext_AB[i], TRUE )
+    moves[mvi++] = up_down_scale_mv[i]
+    
+    up_down_scale_mv2[i] = mvUpDownScale(lambda=2.0, weight=8)
+    up_down_scale_mv2[i].addVariable( spec_AB[i], TRUE )
+    up_down_scale_mv2[i].addVariable( ext_AB[i], TRUE )
+    moves[mvi++] = up_down_scale_mv2[i]
+
+}
+
+# We assume the rates of the two observed (focal) characters 0 and 1 to be equal
+# We let the rates of the two hidden characters A and B to be different
+# Therefore 0A := 0B, 1A := 1B
+speciation[1] := spec_AB[1]
+speciation[2] := spec_AB[1]
+speciation[3] := spec_AB[2]
+speciation[4] := spec_AB[2]
+
+extinction[1] := ext_AB[1]
+extinction[2] := ext_AB[1]
+extinction[3] := ext_AB[2]
+extinction[4] := ext_AB[2]
+
+diversification := speciation - extinction
+
+# rate_matrix = [0A, 1A, 0B, 1B]
+divers_0A := diversification[1]
+divers_1A := diversification[2]
+divers_0B := diversification[3]
+divers_1B := diversification[4]
+
+# ########################################################
+# Set up the transition rate matrix for observed and hidden states #
+#########################################################
+
+# Each transition rate between observed states are drawn
+# from an exponential distribution with a mean of 10
+# character state transitions over the tree. 
+
+rate_pr := observed_phylogeny.treeLength() / 10
+
+# In Freyman & Hoehna, the number of transitions over the tree varies as a stochast variable "num_events"
+# num_events ~ dnExponential(1/20)
+# moves[mvi++] = mvScale(num_events, lambda=20, weight=3)
+# moves[mvi++] = mvScale(num_events, lambda=2, weight=3)
+# rate_pr := psi.treeLength() / num_events
+
+# Model Transitions between observed states
+rate_01 ~ dnExponential( rate_pr ) # transition from Terrestrial to Aquatic
+rate_10 ~ dnExponential( rate_pr ) # transition from Aquatic to Terrestrial
+Q := [rate_01, rate_10]
+
+
+#rate_01 <- 0.0 # no secondary gain of incompatibility
+#rate_10 ~ dnExponential( rate_pr )
+#Q := [rate_01, rate_10]
+
+# Model Transitions between hidden states
+rate_AB ~ dnExponential( rate_pr )
+rate_BA ~ dnExponential( rate_pr )
+R := [rate_AB, rate_BA]
+
+# Create the rate matrix for the combined observed and hidden states 
+rate_matrix := fnHiddenStateRateMatrix(Q, R, rescaled=false)
+
+# Add some movements to the stochastic variables
+moves[mvi++] = mvScale(rate_01, lambda=1.0, weight=4)    
+moves[mvi++] = mvScale(rate_10, lambda=1.0, weight=4)
+moves[mvi++] = mvScale(rate_AB, lambda=1.0, weight=4)
+moves[mvi++] = mvScale(rate_BA, lambda=1.0, weight=4)
+
+moves[mvi++] = mvScale(rate_01, lambda=0.1, weight=4)
+moves[mvi++] = mvScale(rate_10, lambda=0.1, weight=4)
+moves[mvi++] = mvScale(rate_AB, lambda=0.1, weight=4)
+moves[mvi++] = mvScale(rate_BA, lambda=0.1, weight=4)
+
+
+####################################
+# Set up the root state frequencies #
+##################################### 
+
+# For simplicity we will fix the root frequences to be equal among states
+root_states <- simplex( [1,1,1,1] ) 
+
+# An alternative is to use a Dirichlet Distribution
+# root_frequencies ~ dnDirichlet( rep(1,NUM_RATES) )
+
+# If we want to use an irreversible model
+#root_states <- simplex( [0,1,0,1] ) # condition on starting in 1A or 1B
+
+# rho is the probability of sampling species at the present
+rho <- observed_phylogeny.ntips()/NUM_TOTAL_SPECIES
+
+# character dependent birth death process
+timetree ~ dnCDBDP( rootAge           = observed_phylogeny.rootAge(),
+                    speciationRates   = speciation,
+                    extinctionRates   = extinction, 
+                    Q                 = rate_matrix, 
+                    delta             = 1.0,
+                    pi                = root_states,
+                    rho               = rho,
+                    condition         = "survival")
+                    #taxa              = taxa )
+
+#clamp the model with the observed tree and data
+timetree.clamp( observed_phylogeny )
+timetree.clampCharData( data_exp )
+
+
+#############
+# The Model #
+#############
+
+
+### workspace model wrapper ###
+mymodel = model(timetree)
+
+# monitors
+monitors[mni++] = mnScreen(printgen=10, rate_01, rate_10, diversification)
+
+
+################
+# The Analysis #
+################
+
+### workspace mcmc
+mymcmc = mcmc(mymodel, monitors, moves)
+
+### run the MCMC
+mymcmc.run(generations=10000, tuningInterval=100)
+
+
+######### Model Comparisons ############################################################
+# Calculate marginal likelihood using Bayes Factors and path sampling and stepping-stone
+pow_p = powerPosterior(mymodel, moves, monitors, "outputPP/Aquatic_CID2.out", cats=50, sampleFreq=100)
+# pow_p.burnin(generations=10000, tuningInterval=100)  # No need if we run this immediately after mymcmc.run
+pow_p.run(generations=500)
+
+ss = steppingStoneSampler(file="outputPP/Aquatic_CID2.out", powerColumnName="power", likelihoodColumnName="likelihood")
+ss.marginal()
+
+ps = pathSampler(file="outputPP/pow_p_Aquatic_CID2.out", powerColumnName="power", likelihoodColumnName="likelihood")
+ps.marginal()
+
+# We are not interested in recording any character states or transition events. Only on model comparison
+# Thus, we skip the JointAncestral CharacterState and Stochastic Mapping reconstruction
+
+# q()
+
